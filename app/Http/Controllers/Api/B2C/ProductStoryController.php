@@ -21,8 +21,8 @@ class ProductStoryController extends Controller
     {
         // Get all active stories with their view and comment counts
         $stories = ProductStory::withCount(['views', 'comments'])
+            ->with(['media', 'product:id,name,selling_price as price,image_url as image'])
             ->where('expires_at', '>', now())
-            ->with('product:id,name,selling_price as price,image_url as image')
             ->orderBy('created_at', 'desc')
             ->paginate(15);
             
@@ -43,8 +43,8 @@ class ProductStoryController extends Controller
         $stories->getCollection()->transform(function ($story) use ($viewedStories, $baseUrl) {
             $isViewed = in_array($story->id, $viewedStories);
             
-            // Ensure media URL is a full URL using url() helper
-            $mediaUrl = $story->media_path ? url($story->media_path) : null;
+            // Get first media item with thumbnail
+            $firstMedia = $story->media->sortBy('order')->first();
             
             // Helper function to ensure full URL for product image
             $getProductImageUrl = function($path) use ($baseUrl) {
@@ -60,8 +60,7 @@ class ProductStoryController extends Controller
                 'product_id' => $story->product_id,
                 'product_name' => $story->product->name ?? 'Unknown Product',
                 'product_price' => $story->product->price ?? 0,
-                'media_url' => $mediaUrl,
-                'media_type' => $story->media_type,
+               'media_thumbnail' => url($firstMedia->thumbnail_url),
                 'caption' => $story->product->caption ?? $story->caption ?? '',
                 'expires_at' => $story->expires_at,
                 'created_at' => $story->created_at,
@@ -71,19 +70,18 @@ class ProductStoryController extends Controller
                 'product_image' => $productImageUrl
             ];
         });
-
+    
         return response()->json($stories);
     }
-    
     /**
      * Get story details by product ID
      */
     public function showByProduct($productId)
     {
         $story = ProductStory::withCount(['views', 'comments'])
+            ->with(['media', 'product:id,name,selling_price as price,image_url as image'])
             ->where('product_id', $productId)
             ->where('expires_at', '>', now())
-            ->with('product:id,name,selling_price as price,image_url as image')
             ->first();
             
         if (!$story) {
@@ -102,30 +100,8 @@ class ProductStoryController extends Controller
                 ->exists();
         }
         
-        // Use the model's media_url accessor which handles full URL conversion
-        $mediaUrl = $story->media_url;
-            
-        // Build the response array with full URLs
-        $response = [
-            'id' => $story->id,
-            'product_id' => $story->product_id,
-            'product_name' => $story->product->name,
-            'product_price' => $story->product->price,
-            'media_url' => $mediaUrl,
-            'media_type' => $story->media_type,
-            'caption' => $story->product->caption ?? $story->caption,
-            'expires_at' => $story->expires_at,
-            'created_at' => $story->created_at,
-            'comments_count' => $story->comments_count,
-            'views_count' => $story->views_count,
-            'viewed' => $isViewed,
-            // Add full URL for product image
-            'product_image' => $story->product->image ? 
-                (filter_var($story->product->image, FILTER_VALIDATE_URL) ? 
-                    $story->product->image : 
-                    asset('storage/' . ltrim($story->product->image, '/'))
-                ) : null
-        ];
+        $response = $this->formatStoryResponse($story);
+        $response['viewed'] = $isViewed;
             
         return response()->json($response);
     }
@@ -138,9 +114,9 @@ class ProductStoryController extends Controller
         $user = Auth::user();
         
         $story = ProductStory::withCount(['views', 'comments'])
+            ->with(['media', 'product:id,name,selling_price as price,image_url as image'])
             ->where('id', $storyId)
             ->where('expires_at', '>', now())
-            ->with('product:id,name,selling_price as price,image_url as image')
             ->first();
             
         if (!$story) {
@@ -182,33 +158,20 @@ class ProductStoryController extends Controller
         });
         
         // Build the response array with full URLs
-        $response = [
-            'id' => $story->id,
-            'product_id' => $story->product_id,
-            'product_name' => $story->product->name,
-            'product_price' => $story->product->price,
-            'media_url' => $story->media_path ? url($story->media_path) : null,
-            'media_type' => $story->media_type,
-            'caption' => $story->product->caption ?? $story->caption,
-            'expires_at' => $story->expires_at,
-            'created_at' => $story->created_at,
-            'comments_count' => $story->comments_count,
-            'views_count' => $story->views_count,
-            'comments' => $comments,
-            // Add full URL for product image
-            'product_image' => $story->product->image ? url($story->product->image) : null
-        ];
+        $response = $this->formatStoryResponse($story);
+        $response['viewed'] = $isViewed;
             
         return response()->json($response);
     }
 
     /**
-     * Store a newly created story with file upload
+     * Store a newly created story with multiple media files
      */
     public function store(Request $request, $productId)
     {
         $validator = Validator::make($request->all(), [
-            'media' => 'required|file|mimes:jpeg,png,jpg,gif,mp4,mov,avi|max:10240', // 10MB max
+            'media' => 'required|array|min:1|max:10',
+            'media.*' => 'file|mimes:jpeg,png,jpg,gif,mp4,mov,avi|max:10240', // 10MB max per file
             'caption' => 'nullable|string|max:255',
             'expires_in_hours' => 'required|integer|min:1|max:24',
         ]);
@@ -220,43 +183,76 @@ class ProductStoryController extends Controller
         $product = Product::findOrFail($productId);
         
         // Check if story already exists for this product
-        $existingStory = ProductStory::where('product_id', $productId)->first();
+        $story = ProductStory::where('product_id', $productId)->first();
         
-        if ($existingStory) {
-            // Update existing story
-            $story = $existingStory;
-            $story->fill([
+        if (!$story) {
+            // Create new story if it doesn't exist
+            $story = $product->stories()->create([
                 'caption' => $request->caption,
                 'expires_at' => now()->addHours($request->expires_in_hours),
             ]);
-            
-            // Handle file upload
-            if ($request->hasFile('media')) {
-                $story->uploadMedia($request->file('media'));
-            }
-            
-            $story->save();
         } else {
-            // Create new story
-            $story = new ProductStory([
+            // Update existing story
+            $story->update([
                 'caption' => $request->caption,
                 'expires_at' => now()->addHours($request->expires_in_hours),
             ]);
-
-            // Handle file upload
-            if ($request->hasFile('media')) {
-                $story->uploadMedia($request->file('media'));
+            
+            // Delete existing media if needed
+            if ($request->has('media')) {
+                $story->media()->delete();
             }
-
-            $product->stories()->save($story);
         }
         
+        // Handle file uploads
+        if ($request->hasFile('media')) {
+            $story->uploadMultipleMedia($request->file('media'));
+        }
+        
+        // Load relationships for response
+        $story->load(['media', 'product:id,name,selling_price as price,image_url as image']);
         $story->loadCount(['views', 'comments']);
 
         return response()->json([
-            'message' => 'Story created successfully',
-            'story' => $story
+            'message' => 'Story created/updated successfully',
+            'story' => $this->formatStoryResponse($story)
         ], 201);
+    }
+    
+    /**
+     * Format story response with media
+     */
+    protected function formatStoryResponse($story)
+    {
+        $baseUrl = rtrim(config('app.url'), '/');
+        
+        $media = $story->media->map(function($media) {
+            return [
+                'id' => $media->id,
+                'url' => url($media->media_url),
+                'type' => $media->media_type,
+                'order' => $media->order
+            ];
+        });
+        
+        return [
+            'id' => $story->id,
+            'product_id' => $story->product_id,
+            'product_name' => $story->product->name ?? 'Unknown Product',
+            'product_price' => $story->product->price ?? 0,
+            'media' => $media,
+            'media_type' => $story->media_type, // For backward compatibility
+            'caption' => $story->caption,
+            'expires_at' => $story->expires_at,
+            'created_at' => $story->created_at,
+            'comments_count' => $story->comments_count ?? 0,
+            'views_count' => $story->views_count ?? 0,
+            'product_image' => $story->product->image ? 
+                (filter_var($story->product->image, FILTER_VALIDATE_URL) ? 
+                    $story->product->image : 
+                    $baseUrl . '/storage/' . ltrim($story->product->image, '/'))
+                : null
+        ];
     }
 
     /**

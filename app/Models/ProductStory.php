@@ -13,9 +13,6 @@ class ProductStory extends Model
 {
     protected $fillable = [
         'product_id',
-        'media_path',
-        'media_url',
-        'media_type',
         'caption',
         'expires_at'
     ];
@@ -24,7 +21,7 @@ class ProductStory extends Model
         'expires_at' => 'datetime',
     ];
 
-    protected $appends = ['media_url'];
+    protected $appends = ['media_url', 'media_type'];
 
     /**
      * The "booting" method of the model.
@@ -33,70 +30,64 @@ class ProductStory extends Model
     {
         parent::boot();
 
-        // Delete associated file when story is deleted
+        // Delete associated media files when story is deleted
         static::deleting(function ($story) {
-            if ($story->media_path && !filter_var($story->media_path, FILTER_VALIDATE_URL)) {
-                $filePath = public_path($story->media_path);
-                if (file_exists($filePath)) {
-                    unlink($filePath);
-                }
+            foreach ($story->media as $media) {
+                $media->delete();
             }
         });
     }
 
     /**
-     * Get the full URL to the media file
+     * Get the media files for the story.
      */
-    public function getMediaUrlAttribute()
+    public function media()
     {
-        if (!$this->media_path) return null;
-        
-        // If it's already a full URL, return as is
-        if (filter_var($this->media_path, FILTER_VALIDATE_URL)) {
-            return $this->media_path;
-        }
-        
-        // Otherwise, build the full URL from the public path
-        return asset($this->media_path);
+        return $this->hasMany(ProductStoryMedia::class)->orderBy('order');
     }
 
     /**
-     * Handle file upload
+     * For backward compatibility, get the first media URL
      */
-    public function uploadMedia(UploadedFile $file)
+    public function getMediaUrlAttribute()
     {
-        // Delete old file if exists
-        if ($this->media_path && !filter_var($this->media_path, FILTER_VALIDATE_URL)) {
-            $oldFilePath = public_path($this->media_path);
-            if (file_exists($oldFilePath)) {
-                unlink($oldFilePath);
+        $firstMedia = $this->media->first();
+        return $firstMedia ? $firstMedia->media_url : null;
+    }
+
+    /**
+     * For backward compatibility, get the first media type
+     */
+    public function getMediaTypeAttribute()
+    {
+        $firstMedia = $this->media->first();
+        return $firstMedia ? $firstMedia->media_type : null;
+    }
+
+    /**
+     * Upload multiple media files
+     */
+    public function uploadMultipleMedia($files)
+    {
+        if (!is_array($files)) {
+            $files = [$files];
+        }
+
+        foreach ($files as $index => $file) {
+            if ($file instanceof UploadedFile) {
+                $media = new ProductStoryMedia();
+                $media->uploadMedia($file, $index);
+                $this->media()->save($media);
             }
         }
 
-        // Create directory if it doesn't exist
-        $directory = public_path('uploads/stories');
-        if (!file_exists($directory)) {
-            mkdir($directory, 0755, true);
-        }
-
-        // Generate a unique filename
-        $extension = $file->getClientOriginalExtension();
-        $filename = 'story_' . time() . '_' . uniqid() . '.' . $extension;
-        
-        // Move the file to the public directory
-        $file->move($directory, $filename);
-        
-        // Store the relative path
-        $this->media_path = 'uploads/stories/' . $filename;
-        $this->media_type = $this->getMediaType($file->getClientMimeType());
-        
         return $this;
     }
 
     /**
      * Get media type from mime type
      */
-    protected function getMediaType($mimeType)
+    protected function getMediaTypeFromMime($mimeType)
     {
         if (str_contains($mimeType, 'image/')) {
             return 'image';
