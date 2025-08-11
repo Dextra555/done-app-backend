@@ -4,18 +4,35 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 class StoryView extends Model
 {
     protected $fillable = [
         'user_id',
-        'service_video_id',
+        'story_id',
+        'story_type',
         'viewed_at'
     ];
 
     protected $casts = [
         'viewed_at' => 'datetime',
     ];
+    
+    /**
+     * The "booting" method of the model.
+     */
+    protected static function boot()
+    {
+        parent::boot();
+
+        // Set viewed_at when creating a new view
+        static::creating(function ($model) {
+            if (empty($model->viewed_at)) {
+                $model->viewed_at = now();
+            }
+        });
+    }
 
     /**
      * Get the user that viewed the story
@@ -26,10 +43,10 @@ class StoryView extends Model
     }
 
     /**
-     * Get the story that was viewed
+     * Get the parent story model (ServiceVideo or ProductStory)
      */
-    public function story(): BelongsTo
+    public function story(): MorphTo
     {
-        return $this->belongsTo(ServiceVideo::class, 'service_video_id');
+        return $this->morphTo();
     }
 }

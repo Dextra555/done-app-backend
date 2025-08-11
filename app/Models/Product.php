@@ -264,4 +264,9 @@ class Product extends Model
         
         return $images->sortBy('sort_order');
     }
+
+    public function stories()
+    {
+        return $this->hasMany(ProductStory::class);
+    }
 } 

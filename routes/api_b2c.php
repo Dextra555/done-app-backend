@@ -141,4 +141,25 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/notifications', [NotificationController::class, 'clearAll']);
     Route::get('/notifications/statistics', [NotificationController::class, 'statistics']);
 });
+
+Route::get('/products/{product}/story', [\App\Http\Controllers\Api\B2C\ProductStoryController::class, 'showByProduct']);
+
+// Protected routes (require authentication)
+Route::middleware('auth:sanctum')->group(function () {
+    
+    // Public story routes
+    Route::get('/stories', [\App\Http\Controllers\Api\B2C\ProductStoryController::class, 'index']);
+    Route::post('/stories/{story}', [\App\Http\Controllers\Api\B2C\ProductStoryController::class, 'showWithComments']);
+
+    // Product Stories Management
+    Route::post('/products/{product}/stories', [\App\Http\Controllers\Api\B2C\ProductStoryController::class, 'store']);
+    Route::post('/stories/{story}/view', [\App\Http\Controllers\Api\B2C\ProductStoryController::class, 'recordView']);
+    
+    // Story Comments
+    Route::get('/stories/{story}/comments', [\App\Http\Controllers\Api\B2C\StoryCommentController::class, 'index']);
+    Route::post('/stories/{story}/comments', [\App\Http\Controllers\Api\B2C\StoryCommentController::class, 'store']);
+    Route::put('/comments/{comment}', [\App\Http\Controllers\Api\B2C\StoryCommentController::class, 'update']);
+    Route::delete('/comments/{comment}', [\App\Http\Controllers\Api\B2C\StoryCommentController::class, 'destroy']);
+});
+
     
