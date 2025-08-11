@@ -561,8 +561,12 @@ class CartController extends Controller
     public function updateByProduct(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'product_id' => 'required|integer|exists:products,id',
+            'product_id' => 'nullable|required_without:variant_id|integer',
+            'variant_id' => 'nullable|required_without:product_id|integer',
             'quantity' => 'required|integer|min:1',
+        ], [
+            'product_id.required_without' => 'Either product_id or variant_id is required',
+            'variant_id.required_without' => 'Either product_id or variant_id is required'
         ]);
 
         if ($validator->fails()) {
@@ -573,93 +577,96 @@ class CartController extends Controller
             ], 422);
         }
 
-        try {
+        return DB::transaction(function () use ($request) {
             $user = $request->user();
-            $cart = $user->cart;
+            $cart = $user->cart ?: $user->cart()->create(['user_id' => $user->id]);
+            $isVariant = $request->has('variant_id');
 
-            if (!$cart) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Cart not found'
-                ], 404);
+            if ($isVariant) {
+                // Handle variant update
+                $variant = ProductVariant::with('attributeValues.attribute')
+                    ->find($request->variant_id);
+
+                if (!$variant) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Variant not found'
+                    ], 404);
+                }
+
+                // Check stock
+                if ($variant->stock < $request->quantity) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Only ' . $variant->stock . ' items available in stock'
+                    ], 400);
+                }
+
+                // Find the cart item
+                $cartItem = $cart->items()
+                    ->where('variant_id', $request->variant_id)
+                    ->first();
+            } else {
+                // Handle product update
+                $product = Product::find($request->product_id);
+
+                if (!$product) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Product not found'
+                    ], 404);
+                }
+
+                // Check stock
+                if ($product->stock < $request->quantity) {
+                    return response()->json([
+                        'status' => false,
+                        'message' => 'Only ' . $product->stock . ' items available in stock'
+                    ], 400);
+                }
+
+                // Find the cart item
+                $cartItem = $cart->items()
+                    ->where('product_id', $request->product_id)
+                    ->whereNull('variant_id')
+                    ->first();
             }
-
-            $product = Product::active()->inStock()->find($request->product_id);
-
-            if (!$product) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Product not found or out of stock'
-                ], 404);
-            }
-
-            if ($product->stock < $request->quantity) {
-                return response()->json([
-                    'status' => false,
-                    'message' => 'Requested quantity not available. Only ' . $product->stock . ' items in stock.'
-                ], 400);
-            }
-
-            // Find cart item by product ID
-            $cartItem = $cart->items()->where('product_id', $request->product_id)->first();
 
             if (!$cartItem) {
+                $itemType = $isVariant ? 'Variant' : 'Product';
                 return response()->json([
                     'status' => false,
-                    'message' => 'Product not found in cart'
+                    'message' => $itemType . ' not found in cart'
                 ], 404);
             }
 
             // Update the quantity
             $cartItem->update(['quantity' => $request->quantity]);
 
-            // Refresh cart data
-            $cart->load(['items.product.category']);
+            // Reload cart with relationships
+            $cart->load(['items.product', 'items.variant.attributeValues.attribute']);
 
             return response()->json([
                 'status' => true,
-                'message' => 'Cart updated successfully',
+                'message' => 'Cart item updated successfully',
                 'data' => [
-                    'cart' => [
-                        'id' => $cart->id,
-                        'total_items' => $cart->total_items,
-                        'total_price' => $cart->total_price,
-                        'is_empty' => $cart->is_empty,
-                        'items' => $cart->items->map(function ($item) {
-                            return [
-                                'id' => $item->id,
-                                'product_id' => $item->product_id,
-                                'quantity' => $item->quantity,
-                                'total_price' => $item->total_price,
-                                'product' => [
-                                    'id' => $item->product->id,
-                                    'name' => $item->product->name,
-                                    'selling_price' => $item->product->selling_price,
-                                    'image_url' => $item->product->image_url,
-                                    'stock' => $item->product->stock
-                                ]
-                            ];
-                        })
-                    ]
+                    'cart' => $cart->fresh('items.product', 'items.variant.attributeValues.attribute')
                 ]
             ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Failed to update cart',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+        });
     }
-
+   
     /**
-     * Remove item from cart by product ID
+     * Remove item from cart by product_id or variant_id
      */
     public function removeByProduct(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'product_id' => 'required|integer|exists:products,id',
+            'product_id' => 'nullable|required_without:variant_id|integer',
+            'variant_id' => 'nullable|required_without:product_id|integer'
+        ], [
+            'product_id.required_without' => 'Either product_id or variant_id is required',
+            'variant_id.required_without' => 'Either product_id or variant_id is required'
         ]);
 
         if ($validator->fails()) {
@@ -670,7 +677,7 @@ class CartController extends Controller
             ], 422);
         }
 
-        try {
+        return DB::transaction(function () use ($request) {
             $user = $request->user();
             $cart = $user->cart;
 
@@ -681,53 +688,37 @@ class CartController extends Controller
                 ], 404);
             }
 
-            // Find and delete cart item by product ID
-            $deleted = $cart->items()->where('product_id', $request->product_id)->delete();
+            $query = $cart->items();
 
-            if ($deleted === 0) {
+            if ($request->has('variant_id')) {
+                $query->where('variant_id', $request->variant_id);
+            } else {
+                $query->where('product_id', $request->product_id)
+                    ->whereNull('variant_id');
+            }
+
+            $cartItem = $query->first();
+
+            if (!$cartItem) {
+                $itemType = $request->has('variant_id') ? 'Variant' : 'Product';
                 return response()->json([
                     'status' => false,
-                    'message' => 'Product not found in cart'
+                    'message' => $itemType . ' not found in cart'
                 ], 404);
             }
 
-            // Refresh cart data
-            $cart->load(['items.product.category']);
+            $cartItem->delete();
+
+            // Reload cart with relationships
+            $cart->load(['items.product', 'items.variant.attributeValues.attribute']);
 
             return response()->json([
                 'status' => true,
                 'message' => 'Item removed from cart successfully',
                 'data' => [
-                    'cart' => [
-                        'id' => $cart->id,
-                        'total_items' => $cart->total_items,
-                        'total_price' => $cart->total_price,
-                        'is_empty' => $cart->is_empty,
-                        'items' => $cart->items->map(function ($item) {
-                            return [
-                                'id' => $item->id,
-                                'product_id' => $item->product_id,
-                                'quantity' => $item->quantity,
-                                'total_price' => $item->total_price,
-                                'product' => [
-                                    'id' => $item->product->id,
-                                    'name' => $item->product->name,
-                                    'selling_price' => $item->product->selling_price,
-                                    'image_url' => $item->product->image_url,
-                                    'stock' => $item->product->stock
-                                ]
-                            ];
-                        })
-                    ]
+                    'cart' => $cart->fresh('items.product', 'items.variant.attributeValues.attribute')
                 ]
             ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Failed to remove item from cart',
-                'error' => $e->getMessage()
-            ], 500);
-        }
+        });
     }
 }
