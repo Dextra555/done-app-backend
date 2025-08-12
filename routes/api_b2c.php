@@ -36,6 +36,7 @@ Route::get('/home-data', [SegmentController::class, 'getHomeData']);
 // Public product routes
 Route::get('/products', [ProductController::class, 'index']);
 Route::get('/products/category/{categoryId}', [ProductController::class, 'getByCategory']);
+Route::get('/category/product/{categorySlug}', [ProductController::class, 'getByCategorySlug']);
 Route::get('/products/{id}', [ProductController::class, 'show']);
 Route::get('/products/{id}/basic', [ProductController::class, 'showBasic']);
 Route::get('/products/{id}/attributes', [ProductController::class, 'showAttributes']);

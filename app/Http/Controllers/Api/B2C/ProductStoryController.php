@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\B2C;
 
 use App\Http\Controllers\Controller;
+use App\Models\ProductStoryMedia;
 use App\Models\Product;
 use App\Models\ProductStory;
 use App\Models\StoryView;
@@ -46,28 +47,53 @@ class ProductStoryController extends Controller
             // Get first media item with thumbnail
             $firstMedia = $story->media->sortBy('order')->first();
             
-            // Helper function to ensure full URL for product image
-            $getProductImageUrl = function($path) use ($baseUrl) {
+            // Helper function to ensure full URL for media
+            $getMediaUrl = function($path) use ($baseUrl) {
                 if (empty($path)) return null;
                 if (filter_var($path, FILTER_VALIDATE_URL)) return $path;
+                
+                // Check if the path is already a full path
+                if (strpos($path, 'http') === 0) {
+                    return $path;
+                }
+                
+                // Check if the file exists in the public directory
+                if (file_exists(public_path($path))) {
+                    return $baseUrl . '/' . ltrim($path, '/');
+                }
+                
+                // Otherwise, assume it's in storage
                 return $baseUrl . '/storage/' . ltrim($path, '/');
             };
             
-            $productImageUrl = $getProductImageUrl($story->product->image);
+            // Get media thumbnail URL
+            $mediaThumbnail = null;
+            if ($firstMedia) {
+                $mediaThumbnail = $getMediaUrl($firstMedia->thumbnail_path ?: $firstMedia->media_path);
+            } elseif ($story->media_path) {
+                $mediaThumbnail = $getMediaUrl($story->media_path);
+            }
+            
+            // Get product image URL
+            $productImageUrl = null;
+            if (!empty($story->product->image)) {
+                $productImageUrl = $getMediaUrl($story->product->image);
+            }
             
             return [
                 'id' => $story->id,
                 'product_id' => $story->product_id,
                 'product_name' => $story->product->name ?? 'Unknown Product',
                 'product_price' => $story->product->price ?? 0,
-               'media_thumbnail' => url($firstMedia->thumbnail_url),
-                'caption' => $story->product->caption ?? $story->caption ?? '',
+                'media_thumbnail' => $mediaThumbnail,
+                'caption' => $story->caption ?? $story->product->caption ?? '',
                 'expires_at' => $story->expires_at,
                 'created_at' => $story->created_at,
                 'comments_count' => (int) $story->comments_count,
                 'views_count' => (int) $story->views_count,
                 'viewed' => $isViewed,
-                'product_image' => $productImageUrl
+                'product_image' => $productImageUrl,
+                'media_type' => $firstMedia ? $firstMedia->media_type : ($story->media_type ?? 'image')
             ];
         });
     
@@ -170,6 +196,7 @@ class ProductStoryController extends Controller
     public function store(Request $request, $productId)
     {
         $validator = Validator::make($request->all(), [
+            'media_type' => 'required',
             'media' => 'required|array|min:1|max:10',
             'media.*' => 'file|mimes:jpeg,png,jpg,gif,mp4,mov,avi|max:10240', // 10MB max per file
             'caption' => 'nullable|string|max:255',
@@ -185,28 +212,53 @@ class ProductStoryController extends Controller
         // Check if story already exists for this product
         $story = ProductStory::where('product_id', $productId)->first();
         
+        $storyData = [
+            'caption' => $request->caption,
+            'expires_at' => now()->addHours($request->expires_in_hours),
+            'media_type' => in_array('video', (array)$request->media_type) ? 'video' : 'image'
+        ];
+
         if (!$story) {
             // Create new story if it doesn't exist
-            $story = $product->stories()->create([
-                'caption' => $request->caption,
-                'expires_at' => now()->addHours($request->expires_in_hours),
-            ]);
+            $story = $product->stories()->create($storyData);
         } else {
             // Update existing story
-            $story->update([
-                'caption' => $request->caption,
-                'expires_at' => now()->addHours($request->expires_in_hours),
-            ]);
+            $story->update($storyData);
             
-            // Delete existing media if needed
-            if ($request->has('media')) {
-                $story->media()->delete();
-            }
+            // Media will be handled below
         }
         
         // Handle file uploads
         if ($request->hasFile('media')) {
-            $story->uploadMultipleMedia($request->file('media'));
+            // Delete existing media first if any
+            if ($story->media()->exists()) {
+                $story->media()->delete();
+            }
+            
+            // Create uploads directory if it doesn't exist
+            $uploadPath = 'uploads/stories';
+            if (!file_exists(public_path($uploadPath))) {
+                mkdir(public_path($uploadPath), 0777, true);
+            }
+            
+            // Upload new media files
+            foreach ($request->file('media') as $file) {
+                $mediaType = str_contains($file->getMimeType(), 'image/') ? 'image' : 'video';
+                $filename = 'story_' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                $file->move(public_path($uploadPath), $filename);
+                
+                // Save media path to product_stories table
+                $story->update([
+                    'media_path' => $uploadPath . '/' . $filename,
+                    'media_type' => $mediaType
+                ]);
+                
+                // Also save to media table if needed
+                $media = new ProductStoryMedia();
+                $media->media_path = $uploadPath . '/' . $filename;
+                $media->media_type = $mediaType;
+                $story->media()->save($media);
+            }
         }
         
         // Load relationships for response
@@ -226,10 +278,13 @@ class ProductStoryController extends Controller
     {
         $baseUrl = rtrim(config('app.url'), '/');
         
-        $media = $story->media->map(function($media) {
+        $media = $story->media->map(function($media) use ($baseUrl) {
+            // Remove 'storage/' from the media path if it exists
+            $mediaPath = str_replace('storage/', '', $media->media_path);
+            
             return [
                 'id' => $media->id,
-                'url' => url($media->media_url),
+                'url' => $baseUrl . '/' . ltrim($mediaPath, '/'),
                 'type' => $media->media_type,
                 'order' => $media->order
             ];

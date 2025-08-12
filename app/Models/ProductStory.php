@@ -14,14 +14,35 @@ class ProductStory extends Model
     protected $fillable = [
         'product_id',
         'caption',
-        'expires_at'
+        'expires_at',
+        'media_type',
+        'media_path',
+        'media_url'
     ];
 
     protected $casts = [
         'expires_at' => 'datetime',
     ];
 
-    protected $appends = ['media_url', 'media_type'];
+    protected $appends = ['full_media_url'];
+    
+    /**
+     * Get the full URL for the media
+     */
+    public function getFullMediaUrlAttribute()
+    {
+        if (empty($this->media_path)) {
+            return null;
+        }
+        
+        // If it's already a full URL, return as is
+        if (filter_var($this->media_path, FILTER_VALIDATE_URL)) {
+            return $this->media_path;
+        }
+        
+        // Otherwise, generate the full URL
+        return asset('storage/' . ltrim($this->media_path, '/'));
+    }
 
     /**
      * The "booting" method of the model.
@@ -51,6 +72,12 @@ class ProductStory extends Model
      */
     public function getMediaUrlAttribute()
     {
+        // If media_path is set on the story itself, use that
+        if (!empty($this->media_path)) {
+            return $this->full_media_url;
+        }
+        
+        // Otherwise, fall back to the first media item
         $firstMedia = $this->media->first();
         return $firstMedia ? $firstMedia->media_url : null;
     }

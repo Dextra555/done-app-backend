@@ -21,15 +21,15 @@ class OrderController extends Controller
             $user = $request->user();
             $perPage = $request->get('per_page', 10);
             $status = $request->get('status');
-
-            $query = $user->orders()->with(['items.product.category', 'items.product.subcategory']);
-
+    
+            $query = $user->orders()->with(['items.product', 'items.variant.attributeValues.attribute']);
+    
             if ($status) {
                 $query->where('status', $status);
             }
-
+    
             $orders = $query->orderBy('created_at', 'desc')->paginate($perPage);
-
+    
             return response()->json([
                 'status' => true,
                 'message' => 'Orders retrieved successfully',
@@ -47,7 +47,7 @@ class OrderController extends Controller
                     ]
                 ]
             ]);
-
+    
         } catch (\Exception $e) {
             return response()->json([
                 'status' => false,
@@ -56,6 +56,7 @@ class OrderController extends Controller
             ], 500);
         }
     }
+    
 
     /**
      * Get order by ID
@@ -64,15 +65,15 @@ class OrderController extends Controller
     {
         try {
             $user = $request->user();
-            $order = $user->orders()->with(['items.product.category', 'items.product.subcategory'])->find($id);
-
+            $order = $user->orders()->with(['items.product', 'items.variant.attributeValues.attribute'])->find($id);
+    
             if (!$order) {
                 return response()->json([
                     'status' => false,
                     'message' => 'Order not found'
                 ], 404);
             }
-
+    
             return response()->json([
                 'status' => true,
                 'message' => 'Order retrieved successfully',
@@ -80,7 +81,7 @@ class OrderController extends Controller
                     'order' => $this->formatOrder($order)
                 ]
             ]);
-
+    
         } catch (\Exception $e) {
             return response()->json([
                 'status' => false,
@@ -110,6 +111,7 @@ class OrderController extends Controller
             ], 422);
         }
 
+        DB::beginTransaction();
         try {
             $user = $request->user();
             $cart = $user->cart;
@@ -123,16 +125,15 @@ class OrderController extends Controller
 
             // Validate stock availability
             foreach ($cart->items as $item) {
-                $product = $item->product;
-                if ($product->stock < $item->quantity) {
+                $stockCheck = $item->variant ?? $item->product;
+                if ($stockCheck->stock < $item->quantity) {
+                    $itemName = $item->variant ? $item->variant->name : $item->product->name;
                     return response()->json([
                         'status' => false,
-                        'message' => "Insufficient stock for product: {$product->name}"
+                        'message' => "Insufficient stock for item: {$itemName}"
                     ], 400);
                 }
             }
-
-            DB::beginTransaction();
 
             // Create order
             $order = Order::create([
@@ -148,15 +149,31 @@ class OrderController extends Controller
 
             // Create order items and update stock
             foreach ($cart->items as $item) {
-                OrderItem::create([
+                $orderItem = [
                     'order_id' => $order->id,
                     'product_id' => $item->product_id,
+                    'variant_id' => $item->variant_id,
                     'quantity' => $item->quantity,
-                    'price' => $item->product->selling_price
-                ]);
+                    'price' => $item->variant ? $item->variant->main_selling_price : $item->product->selling_price,
+                    'attributes' => $item->variant ? 
+                        $item->variant->attributeValues->map(function($value) {
+                            return [
+                                'attribute_id' => $value->attribute_id,
+                                'attribute_name' => $value->attribute->name,
+                                'value_id' => $value->id,
+                                'value' => $value->value
+                            ];
+                        })->toArray() : null
+                ];
 
-                // Update product stock
-                $item->product->decrement('stock', $item->quantity);
+                OrderItem::create($orderItem);
+
+                // Update stock
+                if ($item->variant) {
+                    $item->variant->decrement('stock', $item->quantity);
+                } else {
+                    $item->product->decrement('stock', $item->quantity);
+                }
             }
 
             // Clear cart
@@ -165,7 +182,7 @@ class OrderController extends Controller
             DB::commit();
 
             // Load order with relationships
-            $order->load(['items.product.category', 'items.product.subcategory']);
+            $order->load(['items.product', 'items.variant.attributeValues.attribute']);
 
             return response()->json([
                 'status' => true,
@@ -375,45 +392,30 @@ class OrderController extends Controller
     /**
      * Format order for response
      */
-    private function formatOrder($order)
+    protected function formatOrder($order)
     {
         return [
             'id' => $order->id,
-            'order_number' => 'ORD-' . str_pad($order->id, 6, '0', STR_PAD_LEFT),
+            'order_number' => $order->order_number,
             'total_amount' => $order->total_amount,
             'status' => $order->status,
-            'address' => $order->address,
-            'latitude' => $order->latitude,
-            'longitude' => $order->longitude,
             'payment_status' => $order->payment_status,
-            'delivery_notes' => $order->delivery_notes,
-            'total_items' => $order->total_items,
-            'is_pending' => $order->is_pending,
-            'is_completed' => $order->is_completed,
-            'is_cancelled' => $order->is_cancelled,
-            'created_at' => $order->created_at,
-            'updated_at' => $order->updated_at,
+            'address' => $order->address,
+            'created_at' => $order->created_at->toDateTimeString(),
             'items' => $order->items->map(function ($item) {
+                $product = $item->product;
+                $variant = $item->variant;
+                
                 return [
                     'id' => $item->id,
                     'product_id' => $item->product_id,
-                    'quantity' => $item->quantity,
+                    'variant_id' => $item->variant_id,
+                    'name' => $variant ? $variant->name : $product->name,
+                    'image' => $variant && $variant->image ? $variant->image : $product->image_url,
                     'price' => $item->price,
-                    'total_price' => $item->total_price,
-                    'product' => [
-                        'id' => $item->product->id,
-                        'name' => $item->product->name,
-                        'description' => $item->product->description,
-                        'image_url' => $item->product->image_url,
-                        'category' => [
-                            'id' => $item->product->category->id,
-                            'name' => $item->product->category->name
-                        ],
-                        'subcategory' => $item->product->subcategory ? [
-                            'id' => $item->product->subcategory->id,
-                            'name' => $item->product->subcategory->name
-                        ] : null
-                    ]
+                    'quantity' => $item->quantity,
+                    'total' => $item->price * $item->quantity,
+                    'attributes' => $variant ? $item->attributes : null
                 ];
             })
         ];

@@ -18,7 +18,11 @@ class Cart extends Model
      *
      * @var array
      */
-    protected $with = ['items.product', 'items.variant.attributeValues.attribute'];
+    protected $with = [
+        'items',
+        'items.product',
+        'items.variant.attributeValues.attribute'
+    ];
 
     /**
      * Get the user that owns this cart

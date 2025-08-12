@@ -8,6 +8,7 @@ use App\Models\ProductReview;
 use App\Models\ProductAttribute;
 use App\Models\AttributeValue;
 use App\Models\ProductVariant;
+use App\Models\Category;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
@@ -965,6 +966,63 @@ class ProductController extends Controller
         }
     }
 
+    /**
+     * Get products by category slug
+     */
+    public function getByCategorySlug(Request $request, $categorySlug)
+    {
+        try {
+            $perPage = $request->get('per_page', 12);
+
+            // First get the category by slug
+            $category = Category::where('slug', $categorySlug)->first();
+            
+            if (!$category) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Category not found'
+                ], 404);
+            }
+
+            $products = Product::with(['category', 'mainVariant', 'reviews' => function ($q) {
+                $q->withRating();
+            }])
+            ->active()
+            ->inStock()
+            ->where('category_id', $category->id)
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage);
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Products by category retrieved successfully',
+                'data' => [
+                    'category_id' => $category->id,
+                    'category_slug' => $categorySlug,
+                    'category_name' => $category->name,
+                    'products' => $products->getCollection()->map(function ($product) {
+                        return $this->formatProduct($product);
+                    }),
+                    'pagination' => [
+                        'current_page' => $products->currentPage(),
+                        'last_page' => $products->lastPage(),
+                        'per_page' => $products->perPage(),
+                        'total' => $products->total(),
+                        'from' => $products->firstItem(),
+                        'to' => $products->lastItem()
+                    ]
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to retrieve products by category',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+    
     /**
      * Get products by category
      */

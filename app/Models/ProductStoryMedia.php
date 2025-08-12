@@ -4,6 +4,8 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class ProductStoryMedia extends Model
 {
@@ -30,134 +32,97 @@ class ProductStoryMedia extends Model
      */
     public function getMediaUrlAttribute()
     {
-        if (!$this->media_path) return null;
-        
-        // If it's already a full URL, return as is
-        if (filter_var($this->media_path, FILTER_VALIDATE_URL)) {
-            return $this->media_path;
-        }
-        
-        // Otherwise, build the full URL from the public path
-        return asset($this->media_path);
+        return $this->media_path ? Storage::url($this->media_path) : null;
     }
-    
+
     /**
-     * Get the full URL to the thumbnail file
+     * Get the full URL to the thumbnail
      */
     public function getThumbnailUrlAttribute()
     {
-        if (!$this->thumbnail_path) return $this->media_url;
-        
-        // If it's already a full URL, return as is
-        if (filter_var($this->thumbnail_path, FILTER_VALIDATE_URL)) {
-            return $this->thumbnail_path;
-        }
-        
-        // Otherwise, build the full URL from the public path
-        return asset($this->thumbnail_path);
+        return $this->thumbnail_path ? Storage::url($this->thumbnail_path) : $this->media_url;
     }
 
     /**
-     * Handle file upload
+     * Upload media file and create thumbnail
      */
-    public function uploadMedia(UploadedFile $file, $order = 0)
+    public function uploadMedia(UploadedFile $file, $type = 'image')
     {
-        // Delete old files if they exist
-        $this->deleteMediaFiles();
-
-        // Create directory if it doesn't exist
-        $directory = public_path('uploads/stories');
-        if (!file_exists($directory)) {
-            mkdir($directory, 0755, true);
+        $path = 'product-stories/' . date('Y/m/d');
+        
+        // Store the original file
+        $filename = Str::random(40) . '.' . $file->getClientOriginalExtension();
+        $filePath = $file->storeAs($path, $filename, 'public');
+        
+        // For images, create a thumbnail using GD
+        if ($type === 'image') {
+            $thumbnailPath = $this->createThumbnail($file, $path);
+        } else {
+            $thumbnailPath = null;
         }
 
-        // Generate a unique filename
-        $extension = $file->getClientOriginalExtension();
-        $filename = 'story_media_' . time() . '_' . uniqid() . '.' . $extension;
-        
-        // Move the file to the public directory
-        $file->move($directory, $filename);
-        
-        // Store the relative path
-        $this->media_path = 'uploads/stories/' . $filename;
-        $this->media_type = $this->getMediaType($file->getClientMimeType());
-        $this->order = $order;
-        
-        // Generate thumbnail for images
-        if ($this->media_type === 'image') {
-            $this->generateThumbnail();
-        }
+        $this->media_path = $filePath;
+        $this->thumbnail_path = $thumbnailPath;
+        $this->media_type = $type;
         
         return $this;
     }
-    
-    /**
-     * Delete associated media files
-     */
-    protected function deleteMediaFiles()
-    {
-        // Delete main media file
-        if ($this->media_path && !filter_var($this->media_path, FILTER_VALIDATE_URL)) {
-            $filePath = public_path($this->media_path);
-            if (file_exists($filePath)) {
-                unlink($filePath);
-            }
-        }
-        
-        // Delete thumbnail file
-        if ($this->thumbnail_path && !filter_var($this->thumbnail_path, FILTER_VALIDATE_URL)) {
-            $thumbnailPath = public_path($this->thumbnail_path);
-            if (file_exists($thumbnailPath)) {
-                unlink($thumbnailPath);
-            }
-        }
-    }
-    
-    /**
-     * Generate a thumbnail for the image
-     */
-    protected function generateThumbnail()
-    {
-        try {
-            $sourcePath = public_path($this->media_path);
-            $thumbnailPath = str_replace(basename($this->media_path), 'thumb_' . basename($this->media_path), $this->media_path);
-            
-            // Check if the source image exists
-            if (!file_exists($sourcePath)) {
-                return false;
-            }
-            
-            // Create image instance
-            $image = Image::make($sourcePath);
-            
-            // Resize to thumbnail size (300x300, maintaining aspect ratio)
-            $image->resize(300, 300, function ($constraint) {
-                $constraint->aspectRatio();
-                $constraint->upsize();
-            });
-            
-            // Save the thumbnail
-            $image->save(public_path($thumbnailPath), 80);
-            
-            // Update the thumbnail path
-            $this->thumbnail_path = $thumbnailPath;
-            $this->save();
-            
-            return true;
-        } catch (\Exception $e) {
-            \Log::error('Failed to generate thumbnail: ' . $e->getMessage());
-            return false;
-        }
-    }
 
     /**
-     * Get media type from mime type
+     * Create a thumbnail using GD
      */
-    protected function getMediaType($mimeType)
+    protected function createThumbnail($file, $path)
     {
-        if (strpos($mimeType, 'video/') !== false) {
-            return 'video';
+        $sourcePath = $file->getPathname();
+        $filename = 'thumb_' . Str::random(40) . '.jpg';
+        $thumbnailPath = $path . '/' . $filename;
+        $destinationPath = storage_path('app/public/' . $thumbnailPath);
+
+        // Get the image dimensions
+        list($width, $height, $type) = getimagesize($sourcePath);
+
+        // Create a new image from file
+        switch ($type) {
+            case IMAGETYPE_JPEG:
+                $source = imagecreatefromjpeg($sourcePath);
+                break;
+            case IMAGETYPE_PNG:
+                $source = imagecreatefrompng($sourcePath);
+                break;
+            case IMAGETYPE_GIF:
+                $source = imagecreatefromgif($sourcePath);
+                break;
+            default:
+                return null;
         }
-        return 'image';
+
+        // Calculate thumbnail dimensions (200px width, maintain aspect ratio)
+        $thumbWidth = 200;
+        $thumbHeight = floor($height * ($thumbWidth / $width));
+
+        // Create the thumbnail
+        $thumb = imagecreatetruecolor($thumbWidth, $thumbHeight);
+        
+        // Preserve transparency for PNG and GIF
+        if ($type == IMAGETYPE_PNG || $type == IMAGETYPE_GIF) {
+            imagecolortransparent($thumb, imagecolorallocatealpha($thumb, 0, 0, 0, 127));
+            imagealphablending($thumb, false);
+            imagesavealpha($thumb, true);
+        }
+
+        // Resize the image
+        imagecopyresampled(
+            $thumb, $source,
+            0, 0, 0, 0,
+            $thumbWidth, $thumbHeight,
+            $width, $height
+        );
+
+        // Save the thumbnail
+        imagejpeg($thumb, $destinationPath, 85);
+        imagedestroy($thumb);
+        imagedestroy($source);
+
+        return $thumbnailPath;
     }
 }
